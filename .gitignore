@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+audio_clips/
+outputs/*
+!outputs/.gitkeep
+Capstone_Project_Dataset_FTTT_2026/tools/tickets_created.csv
+Capstone_Project_Dataset_FTTT_2026/tools/__pycache__/
