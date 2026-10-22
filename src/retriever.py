@@ -101,17 +101,140 @@ def load_documents():
     return chunks
 
 
-def tokenize(text):
-    """Convert text into lowercase searchable terms."""
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+STOP_WORDS = {
+    "a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "can", "could", "will", "would", "shall", "should",
+    "i", "me", "my", "myself", "we", "our", "you", "your", "he", "she", "it", "they",
+    "that", "this", "these", "those", "there", "what", "which", "who", "whom",
+    "how", "when", "where", "why", "if", "so", "as", "by", "from", "up", "out",
+    "about", "into", "through", "after", "before", "just", "now", "still",
+    "not", "m", "t", "s", "d", "ll", "ve", "re", "no", "nor",
+    # Common Hindi / Hinglish stopwords
+    "है", "हैं", "हो", "था", "थी", "थे", "का", "के", "की", "को", "में", "पे",
+    "पर", "से", "ने", "भी", "तो", "ही", "क्या", "अब", "हुई", "हुए", "गया", "गई",
+    "hai", "hain", "ho", "tha", "thi", "the", "ka", "ke", "ki", "ko", "mein", "pe",
+    "par", "se", "ne", "bhi", "to", "hi", "kya", "ab", "wala", "wali", "wale",
+    "liye", "hoga", "hogi", "hoge",
+}
+
+
+def stem(word):
+    """Normalize common English inflectional suffixes."""
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith("ing") and len(word) > 5:
+        return word[:-3]
+    if word.endswith("able") and len(word) > 5:
+        return word[:-4]
+    if word.endswith("ed") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("es") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
+# Reusable idioms and conversational phrases
+GENERAL_PHRASES = (
+    ("send back", "return"),
+    ("send it back", "return"),
+    ("money back", "refund"),
+    ("cash on delivery", "cod cash delivery"),
+    ("collection fee", "pickup fee"),
+    ("collection", "pickup"),
+    # Escalation trigger: activity customer did not make (ESC-1)
+    ("never placed", "did not make"),
+    ("didn't place", "did not make"),
+    ("did not place", "did not make"),
+    ("never made", "did not make"),
+    # Hindi / Hinglish conversational phrases
+    ("खोल लिया", "opened seal"),
+    ("खोल", "opened"),
+    ("कर सकती हूँ", "can"),
+    ("कर सकती", "can"),
+    ("कर सकते", "can"),
+    ("हो सकता है", "can"),
+    ("kitne din", "days window"),
+    ("कितने दिन", "days window"),
+    ("kab tak", "timeline when"),
+)
+
+# Individual word mappings for multilingual terms and catalog categories
+GENERAL_WORDS = {
+    # Hindi/Hinglish vocabulary to policy terminology
+    "वापस": "return",
+    "लौटाने": "return",
+    "लौटा": "return",
+    "वापसी": "return",
+    "दिनों": "days",
+    "दिन": "days",
+    "din": "days",
+    "dino": "days",
+    "टूटा": "damaged",
+    "टूट": "damaged",
+    "खराब": "damaged",
+    "गलत": "wrong",
+    "शिकायत": "complaint",
+    "रिप्लेसमेंट": "replacement",
+    "रिफ़ंड": "refund",
+    "कैंसिल": "cancel",
+    "रद्द": "cancel",
+    "शिप": "shipped",
+    "सामान": "item",
+    "मिला": "received",
+    "parso": "delivered",
+    # Physical condition synonyms
+    "torn": "damaged",
+    "crack": "damaged",
+    "cracked": "damaged",
+    "broken": "damaged",
+    # E-commerce product categories (no policy decisions or durations injected)
+    "swimsuit": "swimwear",
+    "briefs": "innerwear",
+    "kurta": "clothing",
+    "jeans": "clothing",
+    "lipstick": "beauty",
+    "parfum": "beauty",
+    "perfume": "beauty",
+    "laptop": "electronics",
+    "smartphone": "electronics",
+    "earbuds": "electronics",
+}
+
+
+def tokenize(text, filter_stops=False):
+    """Normalize English, Hindi, and Hinglish searchable terms."""
+    text = text.lower().replace("-", " ")
+
+    for source, target in GENERAL_PHRASES:
+        text = text.replace(source, target)
+
+    for source, target in GENERAL_WORDS.items():
+        text = text.replace(source, target)
+
+    tokens = re.findall(r"[a-z0-9]+", text)
+    stemmed = []
+    for token in tokens:
+        st = stem(token)
+        if filter_stops and st in STOP_WORDS:
+            continue
+        stemmed.append(st)
+
+    return set(stemmed)
+
 
 
 def search_documents(question, top_k=5):
     """Rank relevant sections using overlap and document authority."""
-    query_terms = tokenize(question)
+    query_terms = tokenize(question, filter_stops=True)
 
     if not query_terms:
-        return []
+        query_terms = tokenize(question, filter_stops=False)
+        if not query_terms:
+            return []
 
     question_lower = question.lower()
 
@@ -152,7 +275,8 @@ def search_documents(question, top_k=5):
             continue
 
         document_terms = tokenize(
-            chunk["heading"] + " " + chunk["text"]
+            chunk["heading"] + " " + chunk["text"],
+            filter_stops=False,
         )
 
         overlap = query_terms & document_terms
@@ -162,7 +286,7 @@ def search_documents(question, top_k=5):
 
         overlap_score = len(overlap) / len(query_terms)
 
-        heading_terms = tokenize(chunk["heading"])
+        heading_terms = tokenize(chunk["heading"], filter_stops=False)
         heading_score = (
             len(query_terms & heading_terms) / len(query_terms)
         )
