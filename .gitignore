@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .env
 .pytest_cache/
+.cache/
 audio_clips/
 outputs/*
 !outputs/.gitkeep
