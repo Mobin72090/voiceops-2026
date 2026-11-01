@@ -1,0 +1,5 @@
+Hello! I am ZentroMart's AI customer-support assistant. 
+
+I would be happy to help you check your order status. Before I can share any details about your order, I need to verify your account [IDV-1]. 
+
+Could you please provide your Order ID along with either the last four digits of your registered phone number or your delivery pincode? [IDV-1]

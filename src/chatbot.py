@@ -25,6 +25,16 @@ Rules:
 """
 
 
+def answer_question(client, question: str) -> str:
+    """Generate an answer using the baseline model with prompting only."""
+    interaction = client.interactions.create(
+        model=MODEL,
+        input=question,
+        system_instruction=SYSTEM_PROMPT,
+    )
+    return (interaction.output_text or "").strip()
+
+
 def main():
     if not API_KEY:
         raise RuntimeError(
@@ -56,13 +66,7 @@ def main():
             continue
 
         try:
-            interaction = client.interactions.create(
-                model=MODEL,
-                input=question,
-                system_instruction=SYSTEM_PROMPT,
-            )
-
-            answer = interaction.output_text
+            answer = answer_question(client, question)
 
             if answer:
                 print(f"\nZentroMart AI: {answer.strip()}\n")

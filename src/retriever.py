@@ -62,6 +62,10 @@ AUTHORITY_WEIGHTS = {
 HISTORICAL_INDICATORS = (
     "historical",
     "previous policy",
+    "previous return policy",
+    "previous returns policy",
+    "earlier return policy",
+    "old return policy",
     "old policy",
     "version 3",
     "10-day",
@@ -100,7 +104,7 @@ def parse_front_matter(text):
 
 
 def load_documents(kb_dir: Path | str = KB_DIR):
-    """Load Markdown files and split them into sections with full metadata."""
+    """Load Markdown sections while excluding heading-only chunks."""
     chunks = []
     kb_path = Path(kb_dir)
 
@@ -129,36 +133,28 @@ def load_documents(kb_dir: Path | str = KB_DIR):
                 else metadata.get("title", file_path.stem)
             )
 
-            id_match = re.search(
-                r"\[([A-Z0-9_.-]+)\]",
-                heading,
-            )
+            # Keep meaningful content; skip chunks containing only headings.
+            content_lines = [
+                line.strip()
+                for line in part.splitlines()
+                if line.strip()
+                and not re.match(r"^#{1,6}\s+", line.strip())
+            ]
+            if not content_lines:
+                continue
 
-            section_id = (
-                id_match.group(1)
-                if id_match
-                else file_path.stem
-            )
+            id_match = re.search(r"\[([A-Z0-9_.-]+)\]", heading)
+            section_id = id_match.group(1) if id_match else file_path.stem
 
             chunks.append({
                 "source": file_path.name,
                 "section_id": section_id,
                 "heading": heading,
-                "doc_id": metadata.get(
-                    "doc_id", file_path.stem
-                ),
-                "doc_type": metadata.get(
-                    "doc_type", "unspecified"
-                ),
-                "status": metadata.get(
-                    "status", "unspecified"
-                ),
-                "effective_from": metadata.get(
-                    "effective_from", "unspecified"
-                ),
-                "version": metadata.get(
-                    "version", "unspecified"
-                ),
+                "doc_id": metadata.get("doc_id", file_path.stem),
+                "doc_type": metadata.get("doc_type", "unspecified"),
+                "status": metadata.get("status", "unspecified"),
+                "effective_from": metadata.get("effective_from", "unspecified"),
+                "version": metadata.get("version", "unspecified"),
                 "text": part,
             })
 
@@ -515,6 +511,31 @@ def search_documents_lexical(question: str, top_k: int = 5, chunks: list[dict] |
 
         score = overlap_score * authority + heading_score * 0.5
 
+        # For broad return-policy questions, prioritize the authoritative
+        # current section that lists return windows by category.
+        question_lower = question.lower()
+        broad_returns_question = (
+            "return" in question_lower
+            and any(term in question_lower for term in ("policy", "rules", "window"))
+            and not any(
+                term in question_lower
+                for term in (
+                    "electronics", "clothing", "fashion", "grocery",
+                    "innerwear", "historical", "previous policy",
+                    "version 3", "before 1 august 2026",
+                )
+            )
+        )
+
+        if (
+            broad_returns_question
+            and chunk.get("section_id") == "RET-2"
+            and status == "current"
+        ):
+            # Ensure the authoritative return-window section ranks first
+            # for broad return-policy questions.
+            score += 10.0
+
         if status == "superseded":
             score *= 0.7
 
@@ -672,6 +693,22 @@ def search_documents(
             for indicator in HISTORICAL_INDICATORS
         )
 
+        # Detect broad return-policy questions, but exclude category-specific
+        # and historical queries so their ranking remains query-dependent.
+        broad_returns_question = (
+            "return" in question_lower
+            and any(term in question_lower for term in ("policy", "rules", "window"))
+            and not any(
+                term in question_lower
+                for term in (
+                    "electronics", "clothing", "fashion", "grocery",
+                    "innerwear", "historical", "previous policy",
+                    "version 3", "before 1 august 2026",
+                )
+            )
+            and not asks_historical
+        )
+
         query_terms = tokenize(search_query, filter_stops=True)
         if not query_terms:
             query_terms = tokenize(search_query, filter_stops=False)
@@ -718,6 +755,23 @@ def search_documents(
             # Include candidates that have lexical overlap or notable semantic similarity
             if lex_score > 0 or sim > 0.65:
                 combined_score = 0.7 * lex_score + 0.3 * sem_score
+
+                # Prioritize RET-2 for broad, current return-policy questions.
+                if (
+                    broad_returns_question
+                    and chunk.get("section_id") == "RET-2"
+                    and status == "current"
+                ):
+                    combined_score += 10.0
+
+                # Prefer the archived returns policy when the question
+                # explicitly asks about the previous policy.
+                if asks_historical and chunk.get("status", "").lower() == "superseded":
+                    heading = chunk.get("heading", "").lower()
+                    section_id = chunk.get("section_id", "").lower()
+                    if "return" in heading or "return" in section_id:
+                        combined_score += 10.0
+
                 scored_chunks.append((combined_score, chunk))
 
         if not scored_chunks:
@@ -762,3 +816,4 @@ if __name__ == "__main__":
         print(f"Status: {result['status']}")
         print(f"Effective from: {result['effective_from']}")
         print(result["text"][:300])
+

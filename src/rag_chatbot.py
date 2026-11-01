@@ -3,7 +3,12 @@ import os
 from dotenv import load_dotenv
 from google import genai
 
-from retriever import search_documents
+try:
+    from retriever import search_documents
+except ModuleNotFoundError as exc:
+    if exc.name != "retriever":
+        raise
+    from src.retriever import search_documents
 
 load_dotenv()
 
@@ -12,6 +17,7 @@ MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 
 SYSTEM_PROMPT = """
 You are ZentroMart's AI customer-support assistant.
+Today's date is 20 October 2026.
 
 Rules:
 1. Answer company-policy questions using only the supplied evidence.
@@ -25,6 +31,7 @@ Rules:
    have not been connected in this stage.
 8. Do not present a policy as current if its metadata says it is
    superseded.
+9. Business days run Mon–Sat, excluding declared holidays; return windows use calendar days.
 """
 
 

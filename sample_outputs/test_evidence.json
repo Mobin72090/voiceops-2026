@@ -1,0 +1,42 @@
+[
+  {
+    "section_id": "IDV-1",
+    "source": "agent_identity_verification.md",
+    "heading": "[IDV-1] When verification is needed",
+    "doc_type": "agent_guide",
+    "status": "current",
+    "score": 0.698
+  },
+  {
+    "section_id": "PAY-3",
+    "source": "pol_payments_cod.md",
+    "heading": "[PAY-3] Failed payments",
+    "doc_type": "policy",
+    "status": "current",
+    "score": 0.605
+  },
+  {
+    "section_id": "REF-1",
+    "source": "pol_refunds.md",
+    "heading": "[REF-1] When a refund is initiated",
+    "doc_type": "policy",
+    "status": "current",
+    "score": 0.601
+  },
+  {
+    "section_id": "MKS-1",
+    "source": "pol_marketplace_sellers.md",
+    "heading": "[MKS-1] Who ships your order",
+    "doc_type": "policy",
+    "status": "current",
+    "score": 0.496
+  },
+  {
+    "section_id": "CAN-1",
+    "source": "pol_cancellations.md",
+    "heading": "[CAN-1] Before the order ships",
+    "doc_type": "policy",
+    "status": "current",
+    "score": 0.492
+  }
+]

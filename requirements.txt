@@ -3,3 +3,6 @@ google-genai
 pandas
 pytest
 gnani-vachana
+reportlab
+pypdf
+pillow

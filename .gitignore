@@ -4,7 +4,8 @@ __pycache__/
 .env
 .pytest_cache/
 .cache/
-audio_clips/
+*.bak
+*.zip
 outputs/*
 !outputs/.gitkeep
 Capstone_Project_Dataset_FTTT_2026/tools/tickets_created.csv

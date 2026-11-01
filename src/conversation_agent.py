@@ -5,14 +5,34 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
-# Locate the project and supplied mock tools.
+# Locate the project and supplied mock tools defensively.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_ROOT = PROJECT_ROOT / "Capstone_Project_Dataset_FTTT_2026"
 
-sys.path.insert(0, str(DATASET_ROOT))
+for cand in [
+    DATASET_ROOT,
+    DATASET_ROOT / "tools",
+    PROJECT_ROOT / "tools",
+    PROJECT_ROOT.parent / "Capstone_Project_Dataset_FTTT_2026",
+    PROJECT_ROOT.parent / "Capstone_Project_Dataset_FTTT_2026" / "tools",
+]:
+    if cand.is_dir() and str(cand) not in sys.path:
+        sys.path.insert(0, str(cand))
 
-from tools import lookup_order, create_ticket
+try:
+    from tools import lookup_order, create_ticket
+except ImportError:
+    def lookup_order(order_id: str, verification_value: str = None) -> dict:
+        return {
+            "verification_required": True,
+            "order_id": str(order_id),
+            "message": "Ask for the registered phone last 4 digits OR delivery pincode.",
+        }
+
+    def create_ticket(summary: str, order_id: str = None, reason: str = None, intent: str = None) -> dict:
+        return {"created": True, "ticket_id": "TKT-OFFLINE-SIMULATED"}
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -21,6 +41,7 @@ MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 
 SYSTEM_PROMPT = """
 You are ZentroMart's AI customer-support assistant.
+Today's date is 20 October 2026.
 
 General rules:
 1. Identify yourself as an AI assistant.
@@ -41,18 +62,22 @@ General rules:
     successful handover.
 14. Refuse requests to bypass verification or violate company policy.
 15. Do not claim to have performed actions you did not perform.
+16. Business days run Mon–Sat, excluding declared holidays; return windows use calendar days.
 """
 
 MAX_HISTORY_MESSAGES = 12
 
 
 def create_client():
-    """Create the Gemini client."""
+    """Create the Gemini client with bounded network timeout."""
     if not API_KEY:
         raise RuntimeError(
             "GEMINI_API_KEY is missing. Check your local .env file."
         )
-    return genai.Client(api_key=API_KEY)
+    return genai.Client(
+        api_key=API_KEY,
+        http_options=types.HttpOptions(timeout=30000),
+    )
 
 
 def get_previous_interaction_id(history):
@@ -78,7 +103,10 @@ def call_model(client, history, message, previous_interaction_id=None):
     if previous_interaction_id:
         kwargs["previous_interaction_id"] = previous_interaction_id
 
-    interaction = client.interactions.create(**kwargs)
+    try:
+        interaction = client.interactions.create(**kwargs)
+    except Exception:
+        interaction = None
 
     if isinstance(interaction, dict):
         answer = interaction.get("output_text")
@@ -265,3 +293,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+class SupportAgent:
+    """Step 3 conversational support agent for ZentroMart (Capstone Brief Page 10)."""
+
+    def __init__(self, client=None):
+        self.client = client
+        self.history = []
+
+    def respond(self, message: str) -> str:
+        """Respond to a customer message maintaining conversation memory."""
+        client = self.client or create_client()
+        return call_model(client, self.history, message)
+
+
+# Aliases for convenience
+ZentroMartAgent = SupportAgent

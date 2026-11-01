@@ -7,11 +7,14 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
+import run
 from voice_pipeline import (
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DEFAULT_VOICE,
+    UNCLEAR_AUDIO_FALLBACK,
     create_stt_client,
     create_tts_client,
     main,
@@ -280,6 +283,7 @@ def test_process_audio_folder_empty_dir(tmp_path, capsys):
     assert "No supported audio files (.wav) found" in captured
 
 
+
 def test_cli_empty_directory(tmp_path, capsys):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
@@ -288,5 +292,180 @@ def test_cli_empty_directory(tmp_path, capsys):
     exit_code = main(["--input-dir", str(empty_dir), "--output-dir", str(out_dir)])
     assert exit_code == 0
 
+    captured = capsys.readouterr().out
+    assert "No supported audio files (.wav) found" in captured
+
+
+def test_process_audio_folder_skips_unsupported_formats(tmp_path, capsys):
+    folder = tmp_path / "audio_mix"
+    folder.mkdir()
+    (folder / "track.m4a").write_bytes(b"dummy m4a")
+    (folder / "speech.mp3").write_bytes(b"dummy mp3")
+
+    results = process_audio_folder(input_dir=folder, output_dir=tmp_path / "out")
+    assert results == []
+
+    captured = capsys.readouterr().out
+    assert "Skipping unsupported audio file 'track.m4a'" in captured
+    assert "Skipping unsupported audio file 'speech.mp3'" in captured
+    assert "No supported audio files (.wav) found" in captured
+
+
+def test_process_audio_folder_handles_invalid_wav(tmp_path, capsys):
+    folder = tmp_path / "audio_invalid"
+    folder.mkdir()
+    (folder / "corrupted.wav").write_bytes(b"NOT_A_VALID_RIFF")
+
+    results = process_audio_folder(input_dir=folder, output_dir=tmp_path / "out")
+    assert results == []
+
+    captured = capsys.readouterr().out
+    assert "Error processing 'corrupted.wav'" in captured
+
+
+
+# ---------------------------------------------------------------------------
+# 6. Safe Handling of Empty/Unclear Transcripts & Root Runner
+# ---------------------------------------------------------------------------
+
+def test_process_audio_clip_empty_transcript_handling(tmp_path):
+    wav_path = create_test_wav(tmp_path / "empty_speech.wav", duration_seconds=1.0)
+    out_dir = tmp_path / "outputs"
+
+    mock_stt = MagicMock()
+    mock_stt.transcribe.return_value = {"transcript": ""}
+
+    mock_tts = MagicMock()
+    mock_tts.synthesize.return_value = MagicMock(content=b"RIFF_FALLBACK_AUDIO")
+
+    mock_gemini = MagicMock()
+
+    res = process_audio_clip(
+        audio_path=wav_path,
+        output_dir=out_dir,
+        gemini_client=mock_gemini,
+        stt_client=mock_stt,
+        tts_client=mock_tts,
+    )
+
+    # Gemini must NOT be queried with an empty prompt
+    mock_gemini.interactions.create.assert_not_called()
+
+    assert res["clip"] == "empty_speech.wav"
+    assert res["transcript"] == ""
+    assert res["reply_text"] == UNCLEAR_AUDIO_FALLBACK
+    assert res["evidence"] == []
+
+    # Check that all four artifact files were safely created
+    transcript_file = Path(res["transcript_file"])
+    reply_text_file = Path(res["reply_text_file"])
+    reply_audio_file = Path(res["reply_audio_file"])
+    evidence_file = Path(res["evidence_file"])
+
+    assert transcript_file.is_file()
+    assert reply_text_file.is_file()
+    assert reply_audio_file.is_file()
+    assert evidence_file.is_file()
+
+    assert transcript_file.read_text(encoding="utf-8") == ""
+    assert reply_text_file.read_text(encoding="utf-8") == UNCLEAR_AUDIO_FALLBACK
+    assert reply_audio_file.read_bytes() == b"RIFF_FALLBACK_AUDIO"
+    assert json.loads(evidence_file.read_text(encoding="utf-8")) == []
+
+    mock_tts.synthesize.assert_called_once_with(
+        text=UNCLEAR_AUDIO_FALLBACK,
+        voice=DEFAULT_VOICE,
+        model=DEFAULT_MODEL,
+        language=DEFAULT_LANGUAGE,
+    )
+
+
+def test_process_audio_clip_whitespace_transcript_handling(tmp_path):
+    wav_path = create_test_wav(tmp_path / "silence.wav", duration_seconds=1.0)
+    out_dir = tmp_path / "outputs"
+
+    mock_stt = MagicMock()
+    mock_stt.transcribe.return_value = "   \n\t  "
+
+    mock_tts = MagicMock()
+    mock_tts.synthesize.return_value = MagicMock(content=b"RIFF_FALLBACK_AUDIO")
+
+    mock_gemini = MagicMock()
+
+    res = process_audio_clip(
+        audio_path=wav_path,
+        output_dir=out_dir,
+        gemini_client=mock_gemini,
+        stt_client=mock_stt,
+        tts_client=mock_tts,
+    )
+
+    mock_gemini.interactions.create.assert_not_called()
+    assert res["reply_text"] == UNCLEAR_AUDIO_FALLBACK
+    assert res["evidence"] == []
+
+
+def test_root_runner_delegation(tmp_path, capsys):
+    empty_dir = tmp_path / "empty_dir"
+    empty_dir.mkdir()
+    out_dir = tmp_path / "out"
+
+    exit_code = run.main(["--input-dir", str(empty_dir), "--output-dir", str(out_dir)])
+    assert exit_code == 0
+
+    captured = capsys.readouterr().out
+    assert "No supported audio files (.wav) found" in captured
+
+
+
+def test_root_runner_requires_input_dir():
+    with pytest.raises(SystemExit):
+        run.main([])
+
+
+def test_normalize_text_for_speech():
+    from voice_pipeline import normalize_text_for_speech
+    raw = "Your order 10000001 is covered under policy [RET-2] with **full** refund."
+    normalized = normalize_text_for_speech(raw)
+    assert "1000 0001" in normalized
+    assert "[RET-2]" not in normalized
+    assert "**" not in normalized
+
+
+def test_voice_turn_specification(tmp_path):
+    from voice_pipeline import voice_turn
+    wav_path = create_test_wav(tmp_path / "query.wav", duration_seconds=1.0)
+    out_file = tmp_path / "reply.wav"
+
+    mock_stt = MagicMock()
+    mock_stt.transcribe.return_value = {"transcript": "What is the return policy?"}
+
+    mock_tts = MagicMock()
+    mock_tts.synthesize.return_value = MagicMock(content=b"RIFF_SPEECH_DATA")
+
+    mock_agent = MagicMock()
+    mock_agent.respond.return_value = "Electronics can be returned within 7 days."
+
+    heard, reply = voice_turn(
+        audio_path=wav_path,
+        agent=mock_agent,
+        stt_client=mock_stt,
+        tts_client=mock_tts,
+        output_file=out_file,
+    )
+
+    assert heard == "What is the return policy?"
+    assert reply == "Electronics can be returned within 7 days."
+    mock_agent.respond.assert_called_once_with("What is the return policy?")
+    assert out_file.is_file()
+
+
+def test_root_runner_positional_arguments(tmp_path, capsys):
+    empty_dir = tmp_path / "empty_dir"
+    empty_dir.mkdir()
+    out_dir = tmp_path / "positional_out"
+
+    exit_code = run.main([str(empty_dir), str(out_dir)])
+    assert exit_code == 0
     captured = capsys.readouterr().out
     assert "No supported audio files (.wav) found" in captured

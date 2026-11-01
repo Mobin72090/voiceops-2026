@@ -22,6 +22,7 @@ DEFAULT_VOICE = "Kaveri"
 DEFAULT_MODEL = "timbre-v2.5"
 DEFAULT_LANGUAGE = "en-IN"
 MAX_AUDIO_DURATION_SECONDS = 60.0
+UNCLEAR_AUDIO_FALLBACK = "Sorry, I didn't catch that. Could you say it again?"
 
 
 def validate_audio(audio_path: Path | str, max_duration: float = MAX_AUDIO_DURATION_SECONDS) -> float:
@@ -115,6 +116,29 @@ def transcribe_audio(
     return str(transcript).strip()
 
 
+def normalize_text_for_speech(text: str) -> str:
+    """Normalize text for ear / TTS synthesis per Capstone Brief Page 11.
+
+    - Breaks long numeric order IDs (6+ digits) into readable grouped digits.
+    - Strips bracketed section citations (e.g. [RET-2]) and markdown asterisks
+      so synthesized speech sounds natural.
+    """
+    if not text:
+        return text
+
+    import re
+
+    def _group_digits(match):
+        digits = match.group(0)
+        return " ".join([digits[i:i + 4] for i in range(0, len(digits), 4)])
+
+    normalized = re.sub(r"\b\d{6,12}\b", _group_digits, text)
+    normalized = re.sub(r"\[(RET|DWM|CAN|REF|ESC|WAR|FAQ|HLP)-\d+\]", "", normalized)
+    normalized = re.sub(r"\*+", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 def synthesize_speech(
     text: str,
     output_audio_path: Path | str,
@@ -127,9 +151,11 @@ def synthesize_speech(
     output_audio_path = Path(output_audio_path)
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
 
+    spoken_text = normalize_text_for_speech(text)
+
     client = tts_client or create_tts_client()
     audio_response = client.synthesize(
-        text=text,
+        text=spoken_text,
         voice=voice,
         model=model,
         language=language,
@@ -142,10 +168,56 @@ def synthesize_speech(
     elif isinstance(audio_response, dict) and "audio" in audio_response:
         audio_bytes = audio_response["audio"]
     else:
-        audio_bytes = bytes(audio_response)
+        audio_bytes = bytes(audio_response) if audio_response else b""
 
-    output_audio_path.write_bytes(audio_bytes)
+    if not output_audio_path.is_file() or output_audio_path.stat().st_size == 0:
+        output_audio_path.write_bytes(audio_bytes)
     return audio_bytes
+
+
+def voice_turn(
+    audio_path: Path | str,
+    agent=None,
+    stt_client=None,
+    tts_client=None,
+    output_file: Path | str = "reply.wav",
+    language_code: str = DEFAULT_LANGUAGE,
+    voice: str = DEFAULT_VOICE,
+    model: str = DEFAULT_MODEL,
+) -> tuple[str, str]:
+    """Execute a single voice turn matching the official capstone brief specification (Page 10).
+
+    Transcribes audio with Gnani STT, queries Step 3 agent, and synthesizes spoken reply with Gnani TTS.
+    Returns (heard, reply).
+    """
+    stt = stt_client or create_stt_client()
+    tts = tts_client or create_tts_client()
+
+    heard = transcribe_audio(audio_path, stt_client=stt, language_code=language_code)
+
+    if not heard.strip():
+        reply = UNCLEAR_AUDIO_FALLBACK
+    else:
+        if agent is not None and hasattr(agent, "respond"):
+            reply = agent.respond(heard)
+        elif agent is not None and callable(agent):
+            reply = agent(heard)
+        else:
+            retrieved_sections = search_documents(heard, top_k=5)
+            agent_prompt = format_rag_prompt(heard, retrieved_sections)
+            gemini = create_client()
+            reply = call_model(gemini, [], agent_prompt)
+
+    synthesize_speech(
+        text=reply,
+        output_audio_path=output_file,
+        tts_client=tts,
+        voice=voice,
+        model=model,
+        language=language_code,
+    )
+
+    return heard, reply
 
 
 def format_rag_prompt(question: str, results: list) -> str:
@@ -155,6 +227,7 @@ def format_rag_prompt(question: str, results: list) -> str:
 
     evidence = build_evidence(results)
     return (
+        f"Today's date is 20 October 2026. Business days run Mon–Sat excluding declared holidays; return windows use calendar days.\n\n"
         f"Customer query:\n{question}\n\n"
         f"Retrieved knowledge-base evidence:\n{evidence}\n\n"
         f"Answer the customer clearly and concisely using only relevant, authoritative evidence. "
@@ -192,29 +265,39 @@ def process_audio_clip(
     transcript_file = output_dir / f"{clip_stem}_transcript.txt"
     transcript_file.write_text(transcript, encoding="utf-8")
 
-    # 2. Retrieve knowledge-base evidence
-    retrieved_sections = search_documents(transcript, top_k=top_k) if transcript else []
-    evidence_data = [
-        {
-            "section_id": item["section_id"],
-            "source": item["source"],
-            "heading": item["heading"],
-            "doc_type": item.get("doc_type", "unspecified"),
-            "status": item.get("status", "unspecified"),
-            "score": item.get("score", 0.0),
-        }
-        for item in retrieved_sections
-    ]
-    evidence_file = output_dir / f"{clip_stem}_evidence.json"
-    evidence_file.write_text(json.dumps(evidence_data, indent=2), encoding="utf-8")
+    # 2. Handle empty or whitespace-only transcripts safely
+    if not transcript or not transcript.strip():
+        evidence_data = []
+        evidence_file = output_dir / f"{clip_stem}_evidence.json"
+        evidence_file.write_text(json.dumps(evidence_data, indent=2), encoding="utf-8")
 
-    # 3. Generate agent reply with multi-turn memory
-    agent_prompt = format_rag_prompt(transcript, retrieved_sections)
-    client_for_agent = gemini_client or create_client()
-    reply_text = call_model(client_for_agent, history, agent_prompt)
+        reply_text = UNCLEAR_AUDIO_FALLBACK
+        reply_text_file = output_dir / f"{clip_stem}_reply.txt"
+        reply_text_file.write_text(reply_text, encoding="utf-8")
+    else:
+        # Retrieve knowledge-base evidence
+        retrieved_sections = search_documents(transcript, top_k=top_k)
+        evidence_data = [
+            {
+                "section_id": item["section_id"],
+                "source": item["source"],
+                "heading": item["heading"],
+                "doc_type": item.get("doc_type", "unspecified"),
+                "status": item.get("status", "unspecified"),
+                "score": item.get("score", 0.0),
+            }
+            for item in retrieved_sections
+        ]
+        evidence_file = output_dir / f"{clip_stem}_evidence.json"
+        evidence_file.write_text(json.dumps(evidence_data, indent=2), encoding="utf-8")
 
-    reply_text_file = output_dir / f"{clip_stem}_reply.txt"
-    reply_text_file.write_text(reply_text, encoding="utf-8")
+        # 3. Generate agent reply with multi-turn memory
+        agent_prompt = format_rag_prompt(transcript, retrieved_sections)
+        client_for_agent = gemini_client or create_client()
+        reply_text = call_model(client_for_agent, history, agent_prompt)
+
+        reply_text_file = output_dir / f"{clip_stem}_reply.txt"
+        reply_text_file.write_text(reply_text, encoding="utf-8")
 
     # 4. Synthesize reply audio
     reply_audio_file = output_dir / f"{clip_stem}_reply.wav"
@@ -256,7 +339,13 @@ def process_audio_folder(
         print(f"Input directory does not exist or is not a directory: {input_dir}")
         return []
 
-    audio_files = sorted(f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() == ".wav")
+    all_files = sorted(f for f in input_path.iterdir() if f.is_file())
+    audio_files = [f for f in all_files if f.suffix.lower() == ".wav"]
+    unsupported_files = [f for f in all_files if f.suffix.lower() != ".wav" and not f.name.startswith(".")]
+
+    for unf in unsupported_files:
+        print(f"Skipping unsupported audio file '{unf.name}'. Only .wav files are supported.")
+
     if not audio_files:
         print(f"No supported audio files (.wav) found in directory: {input_dir}")
         return []
@@ -266,18 +355,21 @@ def process_audio_folder(
 
     for audio_file in audio_files:
         history_for_turn = shared_history if continuous_conversation else []
-        res = process_audio_clip(
-            audio_path=audio_file,
-            output_dir=output_dir,
-            history=history_for_turn,
-            gemini_client=gemini_client,
-            stt_client=stt_client,
-            tts_client=tts_client,
-            voice=voice,
-            model=model,
-            language=language,
-        )
-        results.append(res)
+        try:
+            res = process_audio_clip(
+                audio_path=audio_file,
+                output_dir=output_dir,
+                history=history_for_turn,
+                gemini_client=gemini_client,
+                stt_client=stt_client,
+                tts_client=tts_client,
+                voice=voice,
+                model=model,
+                language=language,
+            )
+            results.append(res)
+        except Exception as exc:
+            print(f"Error processing '{audio_file.name}': {exc}")
 
     return results
 
@@ -287,13 +379,27 @@ def main(argv: list[str] | None = None) -> int:
         description="ZentroMart Stage 4 Voice Pipeline (Gnani STT/TTS + Support Agent)"
     )
     parser.add_argument(
+        "positional_input",
+        nargs="?",
+        default=None,
+        help="Directory containing customer voice message clips (.wav)",
+    )
+    parser.add_argument(
+        "positional_output",
+        nargs="?",
+        default=None,
+        help="Directory where transcripts, replies, audio, and evidence will be saved (optional positional)",
+    )
+    parser.add_argument(
         "--input-dir",
-        required=True,
+        dest="flag_input_dir",
+        default=None,
         help="Directory containing customer voice message clips (.wav)",
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs",
+        dest="flag_output_dir",
+        default=None,
         help="Directory where transcripts, replies, audio, and evidence will be saved (default: outputs)",
     )
     parser.add_argument(
@@ -301,15 +407,65 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not maintain continuous conversation memory across audio clips in the folder",
     )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Run offline using mock STT/TTS and agent responses (no live API calls)",
+    )
     args = parser.parse_args(argv)
 
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
+    input_dir_str = args.flag_input_dir or args.positional_input
+    if not input_dir_str:
+        parser.error("the following arguments are required: --input-dir (or positional input directory)")
+
+    output_dir_str = args.flag_output_dir or args.positional_output or "outputs"
+    input_dir = Path(input_dir_str)
+    output_dir = Path(output_dir_str)
+
+    gemini_client = None
+    stt_client = None
+    tts_client = None
+
+    if args.mock:
+        from unittest.mock import MagicMock
+
+        class MockInteraction:
+            def __init__(self, interaction_id, output_text):
+                self.id = interaction_id
+                self.output_text = output_text
+
+        def mock_transcribe(path, **kwargs):
+            p = Path(path)
+            if "inaudible" in p.name.lower() or "silence" in p.name.lower() or "empty" in p.name.lower():
+                return ""
+            return "What is the return policy for electronics?"
+
+        mock_stt = MagicMock()
+        mock_stt.transcribe.side_effect = mock_transcribe
+
+        mock_tts = MagicMock()
+        # Valid RIFF header with 1s of 16kHz mono 16-bit silence
+        mock_tts.synthesize.return_value = MagicMock(
+            content=b"RIFF\x24\x7d\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x7d\x00\x00" + b"\x00" * 32000
+        )
+
+        mock_gemini = MagicMock()
+        mock_gemini.interactions.create.return_value = MockInteraction(
+            "int-mock-turn",
+            "Under ZentroMart's policies [RET-3] and [RET-2], the return window for electronics is 7 days from delivery.",
+        )
+
+        stt_client = mock_stt
+        tts_client = mock_tts
+        gemini_client = mock_gemini
 
     results = process_audio_folder(
         input_dir=input_dir,
         output_dir=output_dir,
         continuous_conversation=not args.separate_conversations,
+        gemini_client=gemini_client,
+        stt_client=stt_client,
+        tts_client=tts_client,
     )
 
     if not results:

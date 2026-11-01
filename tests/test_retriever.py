@@ -344,3 +344,15 @@ def test_retrieval_non_product_query():
     results = search_documents("How are return windows counted?", top_k=5)
     section_ids = {r["section_id"] for r in results}
     assert "RET-2" in section_ids or "KB-00.3" in section_ids
+
+
+def test_broad_return_policy_prioritizes_return_windows():
+    """Broad return-policy queries should prioritize the current return-window section."""
+    results = search_documents_lexical(
+        "What is the return policy?",
+        top_k=5,
+    )
+
+    assert results, "Expected results for a broad return-policy query."
+    assert results[0]["section_id"] == "RET-2"
+
